@@ -1,0 +1,32 @@
+# Python / virtual environment
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Streamlit local secrets
+.streamlit/secrets.toml
+
+# Never commit real logs or event registers (they contain usernames and server detail)
+*.log
+QlikLogs/
+audit_files_per_hour.txt
+audit_sample.txt
+event_status.json
+*.tmp
+
+# OS / editor
+Thumbs.db
+.DS_Store
+.vscode/
+.idea/
+
+# Built editions
+dist/
+
+# Data the app writes (only if QLIK_EVENT_DATA points inside the project)
+reported_issues.csv
+app_catalogue.csv
+listing_*.csv.gz
+settings.json
