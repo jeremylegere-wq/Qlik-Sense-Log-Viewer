@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 import qlik_events as qe
+from qlik_scriptlog import clean_text
 
 FAILED = ["Error", "Aborted", "FinishedFail"]
 _NAME_TS = re.compile(r"^(?P<id>[0-9a-fA-F-]{36})\.(?P<ts>\d{8}T\d{6})")
@@ -54,8 +55,8 @@ def read_script(path: str) -> dict:
 
     def ts(v):
         return pd.to_datetime(str(v)[:19], errors="coerce") if v else pd.NaT
-    return {"status": r.status, "error": r.error or "", "started": ts(r.started), "finished": ts(r.finished),
-            "duration_s": r.duration_s, "trigger": r.trigger, "last_line": last}
+    return {"status": r.status, "error": clean_text(r.error), "started": ts(r.started), "finished": ts(r.finished),
+            "duration_s": r.duration_s, "trigger": r.trigger, "last_line": clean_text(last)}
 
 
 def script_runs(files: pd.DataFrame, reader=read_script) -> pd.DataFrame:
@@ -149,6 +150,8 @@ def failures(te: pd.DataFrame | None, sched: pd.DataFrame | None, scripts: pd.Da
                      "why_source": "reload log", "trigger": c.trigger or "", "script_file": c.file})
     out = pd.DataFrame(rows, columns=["start", "end", "task", "app", "app_id", "status", "duration_s", "error",
                                       "why_source", "trigger", "script_file"])
+    for col in ("task", "app", "error", "script_file"):
+        out[col] = out[col].map(clean_text)
     if len(out):
         out["signature"] = out["error"].map(signature)
         out = out.sort_values("start", ascending=False).reset_index(drop=True)

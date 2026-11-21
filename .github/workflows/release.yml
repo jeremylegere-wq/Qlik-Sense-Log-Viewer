@@ -1,0 +1,79 @@
+name: Release
+
+# Pushing a tag like vX.Y.Z runs the full CI, builds a checksummed source zip and creates a DRAFT GitHub Release.
+# Nothing is published automatically: review the draft and click "Publish release" yourself.
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify (same checks as CI)
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    name: Build and create draft release
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # the only job that can write, and only to create the release for this tag
+    env:
+      TAG: ${{ github.ref_name }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out code (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Tag must point at a commit on the default branch
+        run: |
+          git fetch --no-tags origin "$DEFAULT_BRANCH"
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/$DEFAULT_BRANCH"; then
+            echo "::error::Tag $TAG is not on $DEFAULT_BRANCH. Merge your changes first, then tag the merged commit."
+            exit 1
+          fi
+
+      - name: Tag matches the project version, and CHANGELOG has notes
+        run: |
+          VER="${TAG#v}"
+          FILE_VER="$(tr -d '[:space:]' < VERSION)"
+          if [ "$VER" != "$FILE_VER" ]; then
+            echo "::error::Tag $TAG does not match the project version ($FILE_VER)."
+            exit 1
+          fi
+          mkdir -p dist
+          awk -v v="$VER" 'BEGIN{gsub(/\./,"\\.",v)} $0 ~ ("^## \\[?" v "([] (]|$)") {f=1; next} /^## /{f=0} f' CHANGELOG.md > dist/release-notes.md
+          if ! grep -q '[^[:space:]]' dist/release-notes.md; then
+            echo "::error::CHANGELOG.md has no notes under a '## $VER' heading."
+            exit 1
+          fi
+          echo "Release notes for $VER:"; cat dist/release-notes.md
+
+      - name: Build source package and checksum
+        run: |
+          VER="${TAG#v}"
+          git archive --format=zip --prefix="Qlik-Sense-Log-Viewer-$VER/" -o "dist/Qlik-Sense-Log-Viewer-$VER.zip" "$TAG"
+          (cd dist && sha256sum "Qlik-Sense-Log-Viewer-$VER.zip" > "Qlik-Sense-Log-Viewer-$VER.zip.sha256" && sha256sum --check --strict "Qlik-Sense-Log-Viewer-$VER.zip.sha256")
+
+      - name: Create draft GitHub Release
+        run: |
+          PRE=""
+          case "$TAG" in *-*) PRE="--prerelease" ;; esac
+          gh release create "$TAG" dist/*.zip dist/*.sha256 \
+            --draft $PRE \
+            --verify-tag \
+            --title "Qlik Sense Log Viewer $TAG" \
+            --notes-file dist/release-notes.md
+          {
+            echo "### Draft release $TAG created"
+            echo "Review it under Releases, then click **Publish release**."
+            echo; echo '```'; cat dist/*.sha256; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

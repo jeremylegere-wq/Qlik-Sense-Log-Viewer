@@ -18,6 +18,18 @@ LINENO = re.compile(r"^(\d{4,5})(?: {1,2}|$)(.*)$")
 ROWS_RE = re.compile(r"(\d[\d,.\s ']*)\s+(?:lines|rows)\s+fetched", re.I)
 
 
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")   # everything below space except tab, newline and carriage return
+
+
+def clean_text(text) -> str:
+    """Text safe to show and to write to Excel: terminal colour codes, NULs and other control characters removed
+    (a reload log can hold them; Excel refuses them and tables show them as garbage). Tab, newline and CR are kept."""
+    if text is None:
+        return ""
+    return _CTRL.sub("", _ANSI.sub("", str(text))).replace("\ufffd", "?")
+
+
 @dataclass
 class QlikReload:
     path: str
@@ -31,15 +43,17 @@ class QlikReload:
 
 def _decode(raw: bytes) -> str:
     if raw[:3] == b"\xef\xbb\xbf":
-        return raw[3:].decode("utf-8", errors="replace")
-    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
-        return raw.decode("utf-16", errors="replace")
-    if len(raw) > 4 and raw[1:2] == b"\x00" and raw[3:4] == b"\x00":
-        return raw.decode("utf-16-le", errors="replace")
-    try:
-        return raw.decode("utf-8")
-    except UnicodeDecodeError:
-        return raw.decode("cp1252", errors="replace")
+        txt = raw[3:].decode("utf-8", errors="replace")
+    elif raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        txt = raw.decode("utf-16", errors="replace")
+    elif len(raw) > 4 and raw[1:2] == b"\x00" and raw[3:4] == b"\x00":
+        txt = raw.decode("utf-16-le", errors="replace")
+    else:
+        try:
+            txt = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            txt = raw.decode("cp1252", errors="replace")
+    return clean_text(txt)
 
 
 def _read_text(path: str, limit: Optional[int] = None) -> str:
@@ -53,18 +67,41 @@ def _read_text(path: str, limit: Optional[int] = None) -> str:
 
 
 def _tail(path: str, n: int = 6000) -> str:
+    """The last n bytes of the log's real content. A log padded with NULs at the end (a file that was pre-allocated
+    or cut off) is read up to where the text stops."""
     with open(path, "rb") as fh:
         head = fh.read(4)
         size = fh.seek(0, 2)
-        start = max(0, size - n)
         utf16 = head[:2] in (b"\xff\xfe", b"\xfe\xff") or (len(head) == 4 and head[1:2] == b"\x00")
+        end = size
+        block = 65536
+        while end > 0:                      # skip trailing NUL padding (up to ~16 MB back)
+            lo = max(0, end - block)
+            fh.seek(lo)
+            chunk = fh.read(end - lo)
+            stripped = chunk.rstrip(b"\x00")
+            if stripped:
+                end = lo + len(stripped)
+                break
+            end = lo
+            if size - end > 16 * 1024 * 1024:
+                break
+        if utf16 and end % 2:
+            end += 1
+        start = max(0, end - n)
         if utf16 and start % 2:
             start += 1
         fh.seek(start)
-        raw = fh.read()
+        raw = fh.read(end - start)
     if utf16:
-        return raw.decode("utf-16-be" if head[:2] == b"\xfe\xff" else "utf-16-le", errors="replace")
-    return raw.decode("utf-8", errors="replace")
+        return clean_text(raw.decode("utf-16-be" if head[:2] == b"\xfe\xff" else "utf-16-le", errors="replace"))
+    try:
+        return clean_text(raw.decode("utf-8"))
+    except UnicodeDecodeError:
+        txt = raw.decode("utf-8", errors="replace")
+        if txt.count("\ufffd") > 2 + len(txt) // 100:      # more than a cut character: a Windows-1252 log
+            txt = raw.decode("cp1252", errors="replace")
+        return clean_text(txt)
 
 
 def _split_ts(line: str) -> Tuple[str, str]:
@@ -166,7 +203,7 @@ def _status_from(messages: List[str], recent: bool) -> Tuple[str, str]:
                         r"Field '.*' not found)", m, re.I) or re.search(r"\berror\b", m, re.I):
                 err = m
                 break
-    err = hide_credentials(err)[:300]
+    err = clean_text(hide_credentials(err))[:300]
     if failed:
         return "failed", err
     if finished:

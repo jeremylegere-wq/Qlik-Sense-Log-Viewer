@@ -47,8 +47,28 @@ def read_raw(raw: bytes) -> pd.DataFrame:
     )
 
 
+_TEXT_COLS = ("Message", "FailureReason", "Exception", "StackTrace", "TaskName", "AppName", "Logger")
+
+
+def _scrub(df: pd.DataFrame) -> pd.DataFrame:
+    """Take control characters (NULs, colour codes) out of the free-text columns, so they can be shown and exported."""
+    if df is None:
+        return df
+    pat = r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]"
+    for c in _TEXT_COLS:
+        if c in df.columns and (df[c].dtype == object or str(df[c].dtype).startswith("str")):
+            if df[c].astype(str).str.contains(pat, regex=True).any():
+                df[c] = df[c].astype(str).str.replace(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", regex=True).str.replace(pat, "", regex=True)
+    return df
+
+
 def parse_log(name: str, raw: bytes):
     """Return (kind, dataframe, message). See qlik_events.KIND_LABELS for the kinds."""
+    kind, df, msg = _parse_log(name, raw)
+    return kind, _scrub(df), msg
+
+
+def _parse_log(name: str, raw: bytes):
     import qlik_events as qe
     kind, df = qe.parse_text(raw[:4_000_000]) if b"\t" not in raw[:2000] else (None, None)
     if kind:
@@ -107,6 +127,20 @@ _GUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}
 _HEX = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{12,}(?![0-9a-fA-F])")
 _NUM = re.compile(r"\d+(?:\.\d+)?")
 _WS = re.compile(r"\s+")
+
+
+def xl_safe(df: pd.DataFrame) -> pd.DataFrame:
+    """A copy of df that Excel will accept: control characters (NULs, terminal colour codes) taken out of text, and time
+    zones dropped. One such character in one cell makes the whole workbook fail otherwise."""
+    from qlik_scriptlog import clean_text
+    out = df.copy()
+    for col in out.columns:
+        if out[col].dtype == object or str(out[col].dtype).startswith("str"):
+            out[col] = out[col].map(lambda v: clean_text(v) if isinstance(v, str) else v)
+        elif getattr(out[col].dtype, "tz", None) is not None:
+            out[col] = out[col].dt.tz_localize(None)
+    out.columns = [clean_text(c) for c in out.columns]
+    return out
 
 
 def categorise(level: str, msg: str) -> str:

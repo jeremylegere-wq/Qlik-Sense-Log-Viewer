@@ -1,5 +1,17 @@
 # Changelog
 
+## 5.1.1 (2026-11-21)
+- **Fixed: Reload failures and Reloads showed unreadable error text, and the Excel export failed because of it.** A reload
+  log can hold control characters (NULs, terminal colour codes, bell) in an error line, or end in a run of NUL padding.
+  The error text then showed as garbage, and Excel refused the cell (`IllegalCharacterError`), which stopped the whole
+  summary workbook. Reload logs padded with NULs were also read as "running" with no error.
+  - Control characters are now taken out when the logs are read (reload logs and the free-text columns of the Scheduler
+    and engine logs) and again when the failures table is built.
+  - NUL padding at the end of a reload log is skipped, so the real last lines and error are found.
+  - The Excel export cleans every sheet and drops time zones (Excel can't store them). If a sheet still can't be written it
+    is left out and named on the page, instead of the whole workbook failing.
+  - Tests cover each case (reload logs in UTF-8 and UTF-16, NUL padding, the failures table, the export).
+
 ## 5.1.0 (2026-11-13)
 - **Log setup guide** (new page under Share): how to set up Qlik Sense logging so history can be pulled. The QMC engine
   logging settings to check (with Qlik's defaults), which log types each page needs, the folder layout, retention

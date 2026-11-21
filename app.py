@@ -1376,8 +1376,18 @@ def page_export():
     with card("Take the results with you", "Download the findings as a CSV, or everything as an Excel workbook for a report or ticket."):
         fdf = pd.DataFrame(q.findings(d, cores, ram, low_pct, high_pct, cpu_thr))
         buf = io.BytesIO()
+        skipped = []
+
+        def sheet(xw, df_, name):
+            """One sheet. Text Excel refuses (control characters) is cleaned first; a sheet that still fails is skipped and
+            named below instead of stopping the whole workbook."""
+            try:
+                q.xl_safe(df_).to_excel(xw, sheet_name=name, index=False)
+            except Exception as exc:  # noqa: BLE001
+                skipped.append(f"{name} ({type(exc).__name__})")
+
         with pd.ExcelWriter(buf, engine="openpyxl") as xw:
-            fdf.to_excel(xw, sheet_name="Findings", index=False)
+            sheet(xw, fdf, "Findings")
             try:
                 ev_x = get_events(sig, cpu_thr, storm_thr, conc_thr, data)
                 if len(ev_x):
@@ -1385,28 +1395,35 @@ def page_export():
                     ev_x = ev_x.assign(status=ev_x["id"].map(lambda i: stx.get(i, {}).get("status", "New")),
                                        owner=ev_x["id"].map(lambda i: stx.get(i, {}).get("owner", "")),
                                        notes=ev_x["id"].map(lambda i: stx.get(i, {}).get("notes", "")))
-                    ev_x.to_excel(xw, sheet_name="Events", index=False)
+                    sheet(xw, ev_x, "Events")
             except Exception:  # noqa: BLE001
                 pass
             if P is not None and len(P):
-                q.daily_summary(P).to_excel(xw, sheet_name="Daily CPU", index=False)
-                P[["ts", "Hostname", "CPULoad", "ActiveUsers", "ActiveDocSessions", "Calls", "Selections", "VM_GB",
-                   "cache_hit_pct"]].to_excel(xw, sheet_name="Performance", index=False)
+                sheet(xw, q.daily_summary(P), "Daily CPU")
+                sheet(xw, P[["ts", "Hostname", "CPULoad", "ActiveUsers", "ActiveDocSessions", "Calls", "Selections", "VM_GB",
+                             "cache_hit_pct"]], "Performance")
             if S is not None and len(S):
-                S.groupby("app").agg(sessions=("cpu_s", "size"), cpu_s=("cpu_s", "sum")).sort_values("cpu_s", ascending=False) \
-                    .reset_index().to_excel(xw, sheet_name="App CPU", index=False)
+                sheet(xw, S.groupby("app").agg(sessions=("cpu_s", "size"), cpu_s=("cpu_s", "sum")).sort_values("cpu_s", ascending=False)
+                      .reset_index(), "App CPU")
             if P is not None and S is not None:
                 a = q.attribution(P, S, cores)
                 if len(a):
-                    a.to_excel(xw, sheet_name="CPU attribution", index=False)
+                    sheet(xw, a, "CPU attribution")
             if Y is not None and len(Y):
-                Y[Y["Level"] != "INFO"][["ts", "Level", "cat", "Message"]].to_excel(xw, sheet_name="Warnings", index=False)
-            extra = {"Reported issues": reports(), "Reload failures": fail_table(window_only=False),
-                     "Apps": MASTER.drop(columns=["display"], errors="ignore")}
-            for nm, df_ in extra.items():
+                sheet(xw, Y[Y["Level"] != "INFO"][["ts", "Level", "cat", "Message"]], "Warnings")
+            for nm, make in (("Reported issues", reports), ("Reload failures", lambda: fail_table(window_only=False)),
+                             ("Apps", lambda: MASTER.drop(columns=["display"], errors="ignore"))):
+                try:
+                    df_ = make()
+                except Exception as exc:  # noqa: BLE001
+                    skipped.append(f"{nm} ({type(exc).__name__})")
+                    continue
                 if df_ is not None and len(df_):
-                    df_.to_excel(xw, sheet_name=nm, index=False)
+                    sheet(xw, df_, nm)
         st.caption("The workbook also has the reported issues, reload failures and the full app list.")
+        if skipped:
+            st.warning("Left out of the workbook because they couldn't be written: " + ", ".join(skipped)
+                       + ". Everything else is in it.")
         e1, e2 = st.columns(2)
         with e1:
             st.download_button("⬇ Findings (CSV)", fdf.to_csv(index=False).encode(), "qlik_findings.csv", "text/csv")
